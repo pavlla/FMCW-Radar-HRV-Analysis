@@ -132,6 +132,7 @@ def estimate_bpm_series(sig, band, window):
     return np.array(bpm)
 
 
+
 def load_polar_hr(csv_path):
     df = pd.read_csv(csv_path, skiprows=2)
     hr = []
@@ -191,7 +192,7 @@ def run_distance_scenario():
                 "recording": int(rec),
                 "target_bin": target_bin,
                 "rr_radar": round(np.nanmean(rr), 1),
-                "hr_radar": np.nanmedian(hr),
+                "hr_radar": np.nanmean(hr),
                 "hr_ref": np.nanmean(hr_ref)
             })
 
