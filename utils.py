@@ -5,6 +5,8 @@ import pandas as pd
 from scipy.signal import butter, filtfilt, detrend
 from scipy.ndimage import gaussian_filter1d, label
 import config
+from scipy.signal import welch
+
 
 def bandpass(x, fs, f1, f2, order=4):
     b, a = butter(order, [f1/(fs/2), f2/(fs/2)], btype="band")
@@ -88,7 +90,6 @@ def pick_target_bin_motion(mem):
     roi = find_motion_based_roi(range_map)
 
     if roi is None:
-        # awaryjnie – środek zakresu
         return (config.N_ADC // 4)
 
     roi_start, roi_end = roi
@@ -123,9 +124,7 @@ def estimate_bpm_series(sig, band, window):
 
     for start in range(0, len(sig) - window + 1, config.SW):
         seg = sig[start:start + window]
-        freqs = np.fft.rfftfreq(len(seg), 1/config.FS)
-        spec = np.abs(np.fft.rfft(seg))**2
-
+        freqs, spec = welch(seg, fs=config.FS, nperseg=len(seg)//2)
         mask = (freqs >= band[0]) & (freqs <= band[1])
         f_peak = freqs[mask][np.argmax(spec[mask])]
         bpm.append(60 * f_peak)
@@ -192,7 +191,7 @@ def run_distance_scenario():
                 "recording": int(rec),
                 "target_bin": target_bin,
                 "rr_radar": round(np.nanmean(rr), 1),
-                "hr_radar": np.nanmean(hr),
+                "hr_radar": np.nanmedian(hr),
                 "hr_ref": np.nanmean(hr_ref)
             })
 
