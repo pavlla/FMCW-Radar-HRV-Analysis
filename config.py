@@ -19,12 +19,15 @@ N_ADC = 250
 OBS_SECONDS = 60
 OBS_FRAMES = int(OBS_SECONDS * FS)
 
-W_RR = 800 
-W_HR = 400   
-SW = 20     
+W_RR = 1000
+W_HR = 400
+SW = 20
 
-RR_BAND = (0.1, 0.3)
-HR_BAND = (1.0, 3.0)   
+RR_BAND = (0.1, 0.67)
+HR_BAND = (1.0, 3.0)
+
+RR_NFFT = 4096
+RR_SNR_THR = 3.0
 
 C = 3e8
 FC = 79e9

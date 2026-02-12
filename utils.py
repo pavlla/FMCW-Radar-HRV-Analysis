@@ -2,15 +2,15 @@ import os
 import re
 import numpy as np
 import pandas as pd
-from scipy.signal import butter, filtfilt, detrend
+from scipy.signal import butter, sosfiltfilt, detrend
 from scipy.ndimage import gaussian_filter1d, label
 import config
 from scipy.signal import welch
 
 
 def bandpass(x, fs, f1, f2, order=4):
-    b, a = butter(order, [f1/(fs/2), f2/(fs/2)], btype="band")
-    return filtfilt(b, a, x)
+    sos = butter(order, [f1/(fs/2), f2/(fs/2)], btype="band", output="sos")
+    return sosfiltfilt(sos, x)
 
 
 def open_memmap(path):
@@ -101,11 +101,8 @@ def pick_target_bin_motion(mem):
 def extract_displacement(mem, target_bin, mode="RR"):
     s = np.zeros(config.OBS_FRAMES, dtype=np.complex64)
 
-    if mode == "RR":
-        bins = [target_bin]
-    else:
-        bins = [b for b in [target_bin-1, target_bin, target_bin+1]
-                if 0 <= b < config.N_ADC//2]
+    bins = [b for b in [target_bin - 1, target_bin, target_bin + 1]
+            if 0 <= b < config.N_ADC // 2]
 
     for f in range(config.OBS_FRAMES):
         frame = read_frame(mem, f)
@@ -119,15 +116,51 @@ def extract_displacement(mem, target_bin, mode="RR"):
     return (config.LAMBDA / (4 * np.pi)) * phase
 
 
-def estimate_bpm_series(sig, band, window):
+def estimate_bpm_series(sig, band, window, nfft=None):
     bpm = []
 
     for start in range(0, len(sig) - window + 1, config.SW):
         seg = sig[start:start + window]
-        freqs, spec = welch(seg, fs=config.FS, nperseg=len(seg)//2)
+
+        if nfft is not None:
+            seg_nperseg = len(seg)
+            n = nfft
+        else:
+            seg_nperseg = len(seg) // 2
+            n = len(seg)
+
+        freqs, spec = welch(seg, fs=config.FS, nperseg=seg_nperseg,
+                            nfft=n, window="hann")
         mask = (freqs >= band[0]) & (freqs <= band[1])
-        f_peak = freqs[mask][np.argmax(spec[mask])]
-        bpm.append(60 * f_peak)
+        freqs_band = freqs[mask]
+        spec_band = spec[mask]
+
+        if len(spec_band) < 3:
+            bpm.append(np.nan)
+            continue
+
+        peak_idx = np.argmax(spec_band)
+        peak_val = spec_band[peak_idx]
+
+        # SNR gating (only in high-resolution mode = RR)
+        if nfft is not None:
+            median_val = np.median(spec_band)
+            if median_val > 0 and (peak_val / median_val) < config.RR_SNR_THR:
+                bpm.append(np.nan)
+                continue
+
+        # Parabolic interpolation on log-spectrum (Jacobsen estimator)
+        if 0 < peak_idx < len(spec_band) - 1:
+            alpha = np.log(spec_band[peak_idx - 1] + 1e-30)
+            beta  = np.log(spec_band[peak_idx]     + 1e-30)
+            gamma = np.log(spec_band[peak_idx + 1] + 1e-30)
+            delta = 0.5 * (alpha - gamma) / (alpha - 2 * beta + gamma)
+            df = freqs_band[1] - freqs_band[0]
+            f_peak = freqs_band[peak_idx] + delta * df
+        else:
+            f_peak = freqs_band[peak_idx]
+
+        bpm.append(60.0 * f_peak)
 
     return np.array(bpm)
 
@@ -233,7 +266,8 @@ def run_distance_scenario():
                     rr_sig = bandpass(disp_rr, config.FS, *config.RR_BAND)
                     hr_sig = bandpass(disp_hr, config.FS, *config.HR_BAND)
 
-                    rr = estimate_bpm_series(rr_sig, config.RR_BAND, config.W_RR)
+                    rr = estimate_bpm_series(rr_sig, config.RR_BAND, config.W_RR,
+                                             nfft=config.RR_NFFT)
                     hr = estimate_bpm_series(hr_sig, config.HR_BAND, config.W_HR)
 
                     hr_csv = os.path.join(base_hr_gt, condition, f"R{rec}.CSV")
