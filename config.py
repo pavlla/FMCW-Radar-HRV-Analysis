@@ -1,9 +1,13 @@
-
-BASE_RADAR = "Participant 3/1. Distance Scenario"
-BASE_HR_GT = "HR_Ref_Values/Participant 3/1. Distance Scenario"
 BR_REF_ODS = "BR_Ref_Values/BR_ref_human.ods"
 
-DISTANCES = ["40 cm", "80 cm", "120 cm", "160 cm"]
+SCENARIOS = {
+    "Distance": "1. Distance Scenario",
+    "Orientation": "2. Orientation Scenario",
+    "Angle": "3. Angle Scenario",
+    "Elevated": "4. Elevated"
+}
+
+#DISTANCES = ["40 cm", "80 cm", "120 cm", "160 cm"]
 RECORDINGS = ["1", "2", "3", "4"]
 
 FS = 20.0
@@ -15,9 +19,9 @@ N_ADC = 250
 OBS_SECONDS = 60
 OBS_FRAMES = int(OBS_SECONDS * FS)
 
-W_RR = 800  
-W_HR = 400   # 20 s 
-SW = 20      # 1 s
+W_RR = 800 
+W_HR = 400   
+SW = 20     
 
 RR_BAND = (0.1, 0.3)
 HR_BAND = (1.0, 3.0)   
