@@ -146,60 +146,134 @@ def load_polar_hr(csv_path):
     return np.array(hr)
 
 
-def load_br_ref(ods_path):
+def load_br_ref_full(ods_path):
+
     raw = pd.read_excel(ods_path, engine="odf", header=None)
+
     rows = []
 
-    for i, dist in enumerate(config.DISTANCES):
-        vals = raw.iloc[2+i, 3:7].values
-        for r in range(4):
-            rows.append({
-                "distance": dist,
-                "recording": r+1,
-                "br_ref": float(vals[r])
-            })
+    current_participant = None
+    current_scenario = None
+
+    for i in range(len(raw)):
+
+        row = raw.iloc[i]
+
+        # Participant
+        if isinstance(row[0], str) and "Participant" in row[0]:
+            current_participant = int(row[0].split()[-1])
+            continue
+
+        # Scenario
+        if isinstance(row[1], str) and "Scenario" in row[1]:
+
+            if "Distance" in row[1]:
+                current_scenario = "Distance"
+            elif "Posture" in row[1]:
+                current_scenario = "Orientation"
+            elif "Angle" in row[1]:
+                current_scenario = "Angle"
+            continue
+
+        if isinstance(row[1], str) and "Elevated" in row[1]:
+            current_scenario = "Elevated"
+            continue
+
+        if isinstance(row[2], str):
+
+            condition = row[2]
+
+            for rec in range(4):
+
+                val = row[3 + rec]
+
+                if isinstance(val, (int, float)) and not pd.isna(val):
+
+                    rows.append({
+                        "participant": current_participant,
+                        "scenario": current_scenario,
+                        "condition": condition,
+                        "recording": rec + 1,
+                        "br_ref": float(val)
+                    })
+
     return pd.DataFrame(rows)
 
 
 def run_distance_scenario():
-    br_ref = load_br_ref(config.BR_REF_ODS)
-    rows = []
 
-    for dist in config.DISTANCES:
-        for rec in config.RECORDINGS:
-            radar_path = os.path.join(config.BASE_RADAR, dist, rec, "data_Raw_0.bin")
-            if not os.path.exists(radar_path):
+    all_rows = []
+
+    for participant in range(1, 11):
+
+        for scenario_label, scenario_folder in config.SCENARIOS.items():
+
+            base_radar = f"/Volumes/X10 Pro/Human/Radar data/Participant {participant}/{scenario_folder}"
+            base_hr_gt = f"HR_Ref_Values/Participant {participant}/{scenario_folder}"
+
+            if not os.path.exists(base_radar):
                 continue
 
-            mem = open_memmap(radar_path)
+            conditions = os.listdir(base_radar)
 
-            target_bin = pick_target_bin_motion(mem)
+            for condition in conditions:
+                for rec in config.RECORDINGS:
 
-            disp_rr = extract_displacement(mem, target_bin, mode="RR")
-            disp_hr = extract_displacement(mem, target_bin, mode="HR")
+                    radar_path = os.path.join(base_radar, condition, rec, "data_Raw_0.bin")
+                    if not os.path.exists(radar_path):
+                        continue
 
-            rr_sig = bandpass(disp_rr, config.FS, *config.RR_BAND)
-            hr_sig = bandpass(disp_hr, config.FS, *config.HR_BAND)
+                    mem = open_memmap(radar_path)
 
-            rr = estimate_bpm_series(rr_sig, config.RR_BAND, config.W_RR)
-            hr = estimate_bpm_series(hr_sig, config.HR_BAND, config.W_HR)
+                    target_bin = pick_target_bin_motion(mem)
 
-            hr_csv = os.path.join(config.BASE_HR_GT, dist, f"R{rec}.CSV")
-            hr_ref = load_polar_hr(hr_csv)
+                    disp_rr = extract_displacement(mem, target_bin, mode="RR")
+                    disp_hr = extract_displacement(mem, target_bin, mode="HR")
 
-            rows.append({
-                "distance": dist,
-                "recording": int(rec),
-                "target_bin": target_bin,
-                "rr_radar": round(np.nanmean(rr), 1),
-                "hr_radar": np.nanmean(hr),
-                "hr_ref": np.nanmean(hr_ref)
-            })
+                    rr_sig = bandpass(disp_rr, config.FS, *config.RR_BAND)
+                    hr_sig = bandpass(disp_hr, config.FS, *config.HR_BAND)
 
-    df = pd.DataFrame(rows)
-    df = df.merge(br_ref, on=["distance", "recording"])
+                    rr = estimate_bpm_series(rr_sig, config.RR_BAND, config.W_RR)
+                    hr = estimate_bpm_series(hr_sig, config.HR_BAND, config.W_HR)
+
+                    hr_csv = os.path.join(base_hr_gt, condition, f"R{rec}.CSV")
+                    if not os.path.exists(hr_csv):
+                        continue
+
+                    hr_ref = load_polar_hr(hr_csv)
+
+                    all_rows.append({
+                        "participant": participant,
+                        "scenario": scenario_label,
+                        "condition": condition,
+                        "recording": int(rec),
+                        "target_bin": target_bin,
+                        "rr_radar": np.nanmean(rr),
+                        "hr_radar": np.nanmean(hr),
+                        "hr_ref": np.nanmean(hr_ref)
+                    })
+
+
+    df = pd.DataFrame(all_rows)
+
+    br_ref_full = load_br_ref_full(config.BR_REF_ODS)
+
+    df["condition"] = df["condition"].astype(str).str.strip()
+    br_ref_full["condition"] = br_ref_full["condition"].astype(str).str.strip()
+
+    df["scenario"] = df["scenario"].str.strip()
+    br_ref_full["scenario"] = br_ref_full["scenario"].str.strip()
+
+    df = df.merge(
+        br_ref_full,
+        on=["participant","scenario","condition","recording"],
+        how="left"
+    )
 
     df["HR_abs_err"] = (df["hr_radar"] - df["hr_ref"]).abs()
     df["RR_abs_err"] = (df["rr_radar"] - df["br_ref"]).abs()
 
+    df["HR_pct_err"] = (df["HR_abs_err"] / df["hr_ref"]) * 100
+    df["RR_pct_err"] = (df["RR_abs_err"] / df["br_ref"]) * 100
     return df
+
