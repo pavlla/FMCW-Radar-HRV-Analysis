@@ -32,3 +32,7 @@ RR_SNR_THR = 3.0
 C = 3e8
 FC = 79e9
 LAMBDA = C / FC
+
+VMD_ALPHA = 2000    # VMD bandwidth constraint
+VMD_K = 4           # number of modes (drift + RR + HR + noise)
+VMD_TAU = 0         # noise tolerance

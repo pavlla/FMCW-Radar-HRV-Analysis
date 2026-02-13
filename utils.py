@@ -2,15 +2,51 @@ import os
 import re
 import numpy as np
 import pandas as pd
-from scipy.signal import butter, sosfiltfilt, detrend
-from scipy.ndimage import gaussian_filter1d, label, median_filter
+from scipy.signal import butter, sosfiltfilt, detrend, lfilter, welch
+from scipy.ndimage import gaussian_filter1d, label
 import config
-from scipy.signal import welch
+
+try:
+    from vmdpy import VMD
+    _HAS_VMD = True
+except ImportError:
+    _HAS_VMD = False
 
 
 def bandpass(x, fs, f1, f2, order=4):
     sos = butter(order, [f1/(fs/2), f2/(fs/2)], btype="band", output="sos")
     return sosfiltfilt(sos, x)
+
+
+def vmd_extract_respiratory(sig):
+    """VMD decomposition – select mode whose dominant frequency falls in RR_BAND.
+    Falls back to bandpass if vmdpy unavailable, VMD fails, or no mode matches."""
+    if not _HAS_VMD:
+        return bandpass(sig, config.FS, *config.RR_BAND)
+
+    try:
+        u, _, _ = VMD(sig, config.VMD_ALPHA, config.VMD_TAU, config.VMD_K,
+                       0, 1, 1e-7)
+    except Exception:
+        return bandpass(sig, config.FS, *config.RR_BAND)
+
+    best_mode = None
+    best_power = -1.0
+
+    for k in range(u.shape[0]):
+        freqs, psd = welch(u[k], fs=config.FS, nperseg=min(len(u[k]), 512))
+        mask = (freqs >= config.RR_BAND[0]) & (freqs <= config.RR_BAND[1])
+        if not np.any(mask):
+            continue
+        in_band_power = np.max(psd[mask])
+        if in_band_power > best_power:
+            best_power = in_band_power
+            best_mode = k
+
+    if best_mode is None:
+        return bandpass(sig, config.FS, *config.RR_BAND)
+
+    return u[best_mode]
 
 
 def open_memmap(path):
@@ -99,18 +135,37 @@ def pick_target_bin_motion(mem):
 
 
 def extract_displacement(mem, target_bin, mode="RR"):
-    s = np.zeros(config.OBS_FRAMES, dtype=np.complex64)
-
     bins = [b for b in [target_bin - 1, target_bin, target_bin + 1]
             if 0 <= b < config.N_ADC // 2]
+
+    # Per-Rx complex signals: shape (N_RX, OBS_FRAMES)
+    s_rx = np.zeros((config.N_RX, config.OBS_FRAMES), dtype=np.complex64)
 
     for f in range(config.OBS_FRAMES):
         frame = read_frame(mem, f)
         fft_adc = np.fft.fft(frame, axis=-1)
-        s[f] = np.mean(fft_adc[:, :, bins])
+        # Average over chirps and selected bins per Rx channel
+        for rx in range(config.N_RX):
+            s_rx[rx, f] = np.mean(fft_adc[:, rx, bins])
 
+    # MRC: Maximal Ratio Combining across Rx channels
+    h = np.mean(s_rx, axis=1)  # channel response (N_RX,)
+    power = np.sum(np.abs(h) ** 2)
+    if power > 0:
+        w = np.conj(h) / power  # MRC weights (N_RX,)
+    else:
+        w = np.ones(config.N_RX, dtype=np.complex64) / config.N_RX
+    s = w @ s_rx  # combined signal (OBS_FRAMES,)
+
+    # DC removal
     s -= np.mean(s)
-    phase = np.unwrap(np.angle(s))
+
+    # DACM: Differentiate And Cross-Multiply phase extraction
+    I = np.real(s)
+    Q = np.imag(s)
+    eps = 1e-12
+    dphi = (I[:-1] * Q[1:] - Q[:-1] * I[1:]) / (I[:-1]**2 + Q[:-1]**2 + eps)
+    phase = np.concatenate(([0.0], np.cumsum(dphi)))
     phase = detrend(phase)
 
     return (config.LAMBDA / (4 * np.pi)) * phase
@@ -122,14 +177,24 @@ def estimate_bpm_series(sig, band, window, nfft=None):
     for start in range(0, len(sig) - window + 1, config.SW):
         seg = sig[start:start + window]
 
+        # AR(1) pre-whitening for RR path (nfft is set)
         if nfft is not None:
-            seg_nperseg = len(seg)
+            seg_z = seg - np.mean(seg)
+            r0 = np.dot(seg_z, seg_z)
+            if r0 > 0:
+                r1 = np.dot(seg_z[:-1], seg_z[1:])
+                a1 = np.clip(r1 / r0, -0.99, 0.99)
+            else:
+                a1 = 0.0
+            seg_w = lfilter([1, -a1], [1], seg_z)
+            seg_nperseg = len(seg_w)
             n = nfft
         else:
+            seg_w = seg
             seg_nperseg = len(seg) // 2
             n = len(seg)
 
-        freqs, spec = welch(seg, fs=config.FS, nperseg=seg_nperseg,
+        freqs, spec = welch(seg_w, fs=config.FS, nperseg=seg_nperseg,
                             nfft=n, window="hann")
         mask = (freqs >= band[0]) & (freqs <= band[1])
         freqs_band = freqs[mask]
@@ -139,20 +204,40 @@ def estimate_bpm_series(sig, band, window, nfft=None):
             bpm.append(np.nan)
             continue
 
-        # Spectral flattening: normalize out 1/f trend before peak detection
+        peak_idx = np.argmax(spec_band)
+
+        # SNR gating for RR path
         if nfft is not None:
-            kernel = max(len(spec_band) // 5, 5)
-            noise_floor = median_filter(spec_band, size=kernel, mode='reflect')
-            flat_spec = spec_band / (noise_floor + 1e-30)
-            peak_idx = np.argmax(flat_spec)
-            # SNR gating on flattened spectrum (value IS the local SNR)
-            if flat_spec[peak_idx] < config.RR_SNR_THR:
+            median_level = np.median(spec_band)
+            if median_level > 0:
+                snr = spec_band[peak_idx] / median_level
+            else:
+                snr = 0.0
+            if snr < config.RR_SNR_THR:
                 bpm.append(np.nan)
                 continue
-        else:
-            peak_idx = np.argmax(spec_band)
 
-        peak_val = spec_band[peak_idx]
+        f_peak = freqs_band[peak_idx]
+
+        # Harmonic check: prefer subharmonic f/2 or f/3 if plausible (RR path only)
+        if nfft is not None:
+            df = freqs_band[1] - freqs_band[0] if len(freqs_band) > 1 else 1.0
+            peak_amp = spec_band[peak_idx]
+            for divisor in [2, 3]:
+                f_sub = f_peak / divisor
+                if f_sub < band[0] or f_sub > band[1]:
+                    continue
+                sub_idx = int(round((f_sub - freqs_band[0]) / df))
+                if sub_idx < 1 or sub_idx >= len(spec_band) - 1:
+                    continue
+                # Check local maximum
+                if (spec_band[sub_idx] >= spec_band[sub_idx - 1] and
+                        spec_band[sub_idx] >= spec_band[sub_idx + 1]):
+                    # Check amplitude threshold (>= 25% of peak)
+                    if spec_band[sub_idx] >= 0.25 * peak_amp:
+                        f_peak = freqs_band[sub_idx]
+                        peak_idx = sub_idx
+                        break
 
         # Parabolic interpolation on log-spectrum (Jacobsen estimator)
         if 0 < peak_idx < len(spec_band) - 1:
@@ -268,7 +353,7 @@ def run_distance_scenario():
                     disp_rr = extract_displacement(mem, target_bin, mode="RR")
                     disp_hr = extract_displacement(mem, target_bin, mode="HR")
 
-                    rr_sig = bandpass(disp_rr, config.FS, *config.RR_BAND)
+                    rr_sig = vmd_extract_respiratory(disp_rr)
                     hr_sig = bandpass(disp_hr, config.FS, *config.HR_BAND)
 
                     rr = estimate_bpm_series(rr_sig, config.RR_BAND, config.W_RR,
