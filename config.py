@@ -23,7 +23,7 @@ W_RR = 1000
 W_HR = 400
 SW = 20
 
-RR_BAND = (0.1, 0.67)
+RR_BAND = (0.05, 0.67)
 HR_BAND = (1.0, 3.0)
 
 RR_NFFT = 4096

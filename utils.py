@@ -3,7 +3,7 @@ import re
 import numpy as np
 import pandas as pd
 from scipy.signal import butter, sosfiltfilt, detrend
-from scipy.ndimage import gaussian_filter1d, label
+from scipy.ndimage import gaussian_filter1d, label, median_filter
 import config
 from scipy.signal import welch
 
@@ -139,15 +139,20 @@ def estimate_bpm_series(sig, band, window, nfft=None):
             bpm.append(np.nan)
             continue
 
-        peak_idx = np.argmax(spec_band)
-        peak_val = spec_band[peak_idx]
-
-        # SNR gating (only in high-resolution mode = RR)
+        # Spectral flattening: normalize out 1/f trend before peak detection
         if nfft is not None:
-            median_val = np.median(spec_band)
-            if median_val > 0 and (peak_val / median_val) < config.RR_SNR_THR:
+            kernel = max(len(spec_band) // 5, 5)
+            noise_floor = median_filter(spec_band, size=kernel, mode='reflect')
+            flat_spec = spec_band / (noise_floor + 1e-30)
+            peak_idx = np.argmax(flat_spec)
+            # SNR gating on flattened spectrum (value IS the local SNR)
+            if flat_spec[peak_idx] < config.RR_SNR_THR:
                 bpm.append(np.nan)
                 continue
+        else:
+            peak_idx = np.argmax(spec_band)
+
+        peak_val = spec_band[peak_idx]
 
         # Parabolic interpolation on log-spectrum (Jacobsen estimator)
         if 0 < peak_idx < len(spec_band) - 1:
